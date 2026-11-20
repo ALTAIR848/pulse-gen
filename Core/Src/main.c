@@ -24,7 +24,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
-#include "oled.h"
+#include "pulse.h"
+#include "key.h"
+#include "display.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,9 +54,28 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static uint32_t g_last_tick = 0;   /* 上次1秒任务执行时刻 */
-static uint32_t g_uptime_s = 0;    /* 开机以来的秒数 */
-static char g_line[24];            /* 显示/打印用的临时行缓冲 */
+static uint32_t g_last_tick = 0;          /* 上次1秒任务执行时刻 */
+static uint32_t g_uptime_s = 0;           /* 开机以来的秒数 */
+static char g_line[96];                   /* 串口打印缓冲 */
+
+/* UI 状态机 */
+typedef enum
+{
+  UI_HOME_BROWSE = 0,                     /* 主页浏览: 上下移动光标 */
+  UI_HOME_MODESEL,                        /* 主页模式滚动选择 */
+  UI_CH_PAGE,                             /* 通道选择子页 */
+  UI_EDIT_PAGE                            /* 数值编辑子页 */
+} ui_state_t;
+
+static ui_state_t g_ui_state = UI_HOME_BROWSE;
+static pulse_page_t g_page;               /* 主页行列表 */
+static uint8_t g_cursor = 0;              /* 主页光标(页面行索引) */
+static uint8_t g_scroll_top = 0;          /* 主页列表滚动起点 */
+static uint8_t g_ch_cursor = 0;           /* 通道子页光标(0~3通道, 4返回) */
+static uint8_t g_ch_scroll = 0;           /* 通道子页滚动起点 */
+static pulse_mode_t g_mode_backup;        /* 模式选择前的模式(取消恢复) */
+static pulse_edit_info_t g_edit_info;     /* 编辑信息 */
+static uint8_t g_display_dirty = 1;       /* 需要刷新显示 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,10 +88,235 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 
 /**
- * @brief  每1秒执行一次的任务: 刷新OLED显示 + 串口打印
+ * @brief  重建主页行列表并钳制光标/滚动位置
+ */
+static void main_rebuild_page(void)
+{
+  pulse_build_main_page(&g_page);
+
+  if (g_cursor >= g_page.count)
+  {
+    g_cursor = (uint8_t)(g_page.count - 1u);
+  }
+}
+
+/**
+ * @brief  主页列表滚动跟随光标: 4行窗口, 所有行(含模式行)同权滚动
+ */
+static void main_fix_scroll(void)
+{
+  if (g_page.count <= 4u)
+  {
+    g_scroll_top = 0u;
+    return;
+  }
+
+  if (g_scroll_top > (uint8_t)(g_page.count - 4u))
+  {
+    g_scroll_top = (uint8_t)(g_page.count - 4u);
+  }
+
+  if (g_cursor < g_scroll_top)
+  {
+    g_scroll_top = g_cursor;
+  }
+
+  if (g_cursor > (uint8_t)(g_scroll_top + 3u))
+  {
+    g_scroll_top = (uint8_t)(g_cursor - 3u);
+  }
+}
+
+/**
+ * @brief  通道子页滚动跟随光标(4行窗口, 5行内容)
+ */
+static void ch_fix_scroll(void)
+{
+  if (g_ch_cursor < g_ch_scroll)
+  {
+    g_ch_scroll = g_ch_cursor;
+  }
+
+  if (g_ch_cursor > (uint8_t)(g_ch_scroll + 3u))
+  {
+    g_ch_scroll = (uint8_t)(g_ch_cursor - 3u);
+  }
+}
+
+/**
+ * @brief  处理一个按键事件(电视遥控式交互)
+ *  主页浏览: 上/下移动光标; 确认: 模式行进滚动选择, CHSel进通道子页, 数值行进编辑子页
+ *  模式选择: 上/下实时切换模式(各模式参数独立), 短按确认锁定, 长按取消恢复
+ *  通道子页: 确认直接翻转勾选, Back行确认返回; 长按确认也返回
+ *  编辑子页: 上/下改值, 短按确认保存返回, 长按确认取消恢复
+ */
+static void ui_handle_event(key_event_t ev, key_id_t id)
+{
+  uint8_t move = (ev == KEY_EVENT_DOWN) || (ev == KEY_EVENT_REPEAT);
+
+  switch (g_ui_state)
+  {
+    case UI_HOME_BROWSE:
+      if (move && id == KEY_ID_UP)
+      {
+        g_cursor = (g_cursor == 0u)
+                   ? (uint8_t)(g_page.count - 1u) : (uint8_t)(g_cursor - 1u);
+        main_fix_scroll();
+      }
+      else if (move && id == KEY_ID_DOWN)
+      {
+        g_cursor = (g_cursor >= (uint8_t)(g_page.count - 1u))
+                   ? 0u : (uint8_t)(g_cursor + 1u);
+        main_fix_scroll();
+      }
+      else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_RELEASE_SHORT)
+      {
+        uint8_t type = g_page.row[g_cursor].type;
+
+        if (type == (uint8_t)PULSE_ROW_MODE)
+        {
+          g_mode_backup = pulse_param_get()->mode;
+          g_ui_state = UI_HOME_MODESEL;
+        }
+        else if (type == (uint8_t)PULSE_ROW_CHSEL)
+        {
+          g_ch_cursor = 0u;
+          g_ch_scroll = 0u;
+          g_ui_state = UI_CH_PAGE;
+        }
+        else if (type == (uint8_t)PULSE_ROW_PWM_EN)
+        {
+          /* 布尔项: 确认直接翻转, 不进编辑 */
+          pulse_pwm_toggle();
+        }
+        else if (type == (uint8_t)PULSE_ROW_TIM_FREQ ||
+                 type == (uint8_t)PULSE_ROW_CH_DUTY ||
+                 type == (uint8_t)PULSE_ROW_CH_PHASE ||
+                 type == (uint8_t)PULSE_ROW_DUAL_P1 ||
+                 type == (uint8_t)PULSE_ROW_DUAL_GAP ||
+                 type == (uint8_t)PULSE_ROW_DUAL_P2 ||
+                 type == (uint8_t)PULSE_ROW_CS_FREQ ||
+                 type == (uint8_t)PULSE_ROW_CS_CLRW ||
+                 type == (uint8_t)PULSE_ROW_CS_CLRI ||
+                 type == (uint8_t)PULSE_ROW_CS_PULSE)
+        {
+          if (pulse_begin_edit(type, g_page.row[g_cursor].idx, &g_edit_info))
+          {
+            g_ui_state = UI_EDIT_PAGE;
+          }
+        }
+        else if (type == (uint8_t)PULSE_ROW_TRIGGER)
+        {
+          /* 触发脉冲: 确认一次触发一次 */
+          pulse_trigger_fire();
+        }
+      }
+      break;
+
+    case UI_HOME_MODESEL:
+      if (move && id == KEY_ID_UP)
+      {
+        pulse_param_set_mode((pulse_mode_t)((pulse_param_get()->mode + PULSE_MODE_COUNT - 1u) % PULSE_MODE_COUNT));
+        main_rebuild_page();
+        main_fix_scroll();
+      }
+      else if (move && id == KEY_ID_DOWN)
+      {
+        pulse_param_set_mode((pulse_mode_t)((pulse_param_get()->mode + 1u) % PULSE_MODE_COUNT));
+        main_rebuild_page();
+        main_fix_scroll();
+      }
+      else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_RELEASE_SHORT)
+      {
+        /* 锁定 */
+        g_ui_state = UI_HOME_BROWSE;
+      }
+      else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_LONG)
+      {
+        /* 取消, 恢复原模式 */
+        pulse_param_set_mode(g_mode_backup);
+        main_rebuild_page();
+        main_fix_scroll();
+        g_ui_state = UI_HOME_BROWSE;
+      }
+      break;
+
+    case UI_CH_PAGE:
+      if (move && id == KEY_ID_UP)
+      {
+        g_ch_cursor = (g_ch_cursor == 0u)
+                      ? (uint8_t)(PULSE_CH_COUNT + 1u) : (uint8_t)(g_ch_cursor - 1u);
+        ch_fix_scroll();
+      }
+      else if (move && id == KEY_ID_DOWN)
+      {
+        g_ch_cursor = (g_ch_cursor >= PULSE_CH_COUNT + 1u)
+                      ? 0u : (uint8_t)(g_ch_cursor + 1u);
+        ch_fix_scroll();
+      }
+      else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_RELEASE_SHORT)
+      {
+        if (g_ch_cursor == 0u)
+        {
+          g_ui_state = UI_HOME_BROWSE;      /* Back行: 返回主页 */
+        }
+        else if (g_ch_cursor == (uint8_t)(PULSE_CH_COUNT + 1u))
+        {
+          /* 同步选项: T3主T4从, 勾选后共用一个频率 */
+          pulse_sync_toggle();
+          main_rebuild_page();      /* 主页频率行数随同步状态变化 */
+          main_fix_scroll();
+        }
+        else
+        {
+          /* 布尔勾选: 确认直接翻转(映射回通道索引) */
+          pulse_ch_toggle((uint8_t)(g_ch_cursor - 1u));
+          main_rebuild_page();      /* 主页行数随勾选变化 */
+          main_fix_scroll();
+        }
+      }
+      else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_LONG)
+      {
+        g_ui_state = UI_HOME_BROWSE;
+      }
+      break;
+
+    case UI_EDIT_PAGE:
+      if (move && (id == KEY_ID_UP || id == KEY_ID_DOWN))
+      {
+        pulse_edit_step((id == KEY_ID_UP) ? -1 : 1);    /* 上=减 下=加 */
+        g_edit_info.value = pulse_edit_value();   /* 同步编辑页显示值 */
+      }
+      else if (id == KEY_ID_CONFIRM)
+      {
+        if (ev == KEY_EVENT_RELEASE_SHORT)
+        {
+          pulse_edit_commit();      /* 保存返回 */
+          g_ui_state = UI_HOME_BROWSE;
+        }
+        else if (ev == KEY_EVENT_LONG)
+        {
+          pulse_edit_cancel();      /* 取消恢复 */
+          g_ui_state = UI_HOME_BROWSE;
+        }
+      }
+      break;
+
+    default:
+      g_ui_state = UI_HOME_BROWSE;
+      break;
+  }
+
+  g_display_dirty = 1;
+}
+
+/**
+ * @brief  每1秒执行一次的任务: 串口打印 + LED心跳 + 显示刷新标记
  */
 static void app_1s_task(void)
 {
+  const pulse_param_t *p = pulse_param_get();
+
   g_uptime_s++;
 
   /* LED0 每2秒翻转一次, 作为心跳指示 */
@@ -79,16 +325,23 @@ static void app_1s_task(void)
     LED0_BLINK();
   }
 
-  /* 串口打印 */
-  snprintf(g_line, sizeof(g_line), "Hello, uptime: %lu s\r\n",
-           (unsigned long)g_uptime_s);
+  snprintf(g_line, sizeof(g_line),
+           "Hello, uptime:%lus | Mode=%s PWMEN=%u SYNC=%u TRIG=%lu | T3=%luHz T4=%luHz | "
+           "C1[%u] D%u P%u C2[%u] D%u P%u C3[%u] D%u P%u "
+           "C4[%u] D%u P%u C5[%u] D%u P%u C6[%u] D%u P%u\r\n",
+           (unsigned long)g_uptime_s, pulse_mode_name(p->mode), p->pwm_enabled,
+           p->pwm_sync, (unsigned long)pulse_trigger_count(),
+           (unsigned long)p->freq_hz[0], (unsigned long)p->freq_hz[1],
+           p->ch[0].enabled, p->ch[0].duty_pct, p->ch[0].phase_pct,
+           p->ch[1].enabled, p->ch[1].duty_pct, p->ch[1].phase_pct,
+           p->ch[2].enabled, p->ch[2].duty_pct, p->ch[2].phase_pct,
+           p->ch[3].enabled, p->ch[3].duty_pct, p->ch[3].phase_pct,
+           p->ch[4].enabled, p->ch[4].duty_pct, p->ch[4].phase_pct,
+           p->ch[5].enabled, p->ch[5].duty_pct, p->ch[5].phase_pct);
   printf("%s", g_line);
 
-  /* OLED显示 */
-  oled_show_string(0, 0, "Hello", 16);
-  snprintf(g_line, sizeof(g_line), "Up: %lu s ", (unsigned long)g_uptime_s);
-  oled_show_string(0, 16, g_line, 16);
-  oled_refresh_gram();
+  /* 模式行秒数更新, 走整页刷新 */
+  g_display_dirty = 1;
 }
 
 /* USER CODE END 0 */
@@ -125,10 +378,13 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   LED1_OFF();
-  oled_init();
+  pulse_param_init();
+  pulse_param_load();
+  key_init();
+  display_init();
+  main_rebuild_page();
   printf("pulse-gen started\r\n");
 
-  app_1s_task();           /* 上电立即执行一次 */
   g_last_tick = HAL_GetTick();
   /* USER CODE END 2 */
 
@@ -136,7 +392,56 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* 非阻塞1秒调度, 便于以后加入按键扫描和脉冲控制 */
+    /* 按键扫描: 处理本轮所有按键事件 */
+    key_id_t key_id;
+    key_event_t key_ev;
+
+    while ((key_ev = key_scan(&key_id)) != KEY_EVENT_NONE)
+    {
+      ui_handle_event(key_ev, key_id);
+    }
+
+    /* 按需刷新显示(整页约8ms, 不脏不刷) */
+    if (g_display_dirty)
+    {
+      g_display_dirty = 0;
+
+      switch (g_ui_state)
+      {
+        case UI_HOME_BROWSE:
+        case UI_HOME_MODESEL:
+          display_show_main_page(&g_page, g_cursor, g_scroll_top,
+                                 (g_ui_state == UI_HOME_MODESEL), g_uptime_s);
+          break;
+
+        case UI_CH_PAGE:
+          display_show_ch_page(pulse_param_get(), g_ch_cursor, g_ch_scroll);
+          break;
+
+        case UI_EDIT_PAGE:
+          display_show_edit_page(&g_edit_info);
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    /* 触发脉冲即时反馈: LED1闪 + 串口打印 */
+    {
+      static uint32_t s_last_trig = 0;
+      uint32_t tc = pulse_trigger_count();
+
+      if (tc != s_last_trig)
+      {
+        s_last_trig = tc;
+        LED1_BLINK();
+        printf(">> Trigger #%lu (Mode=%s)\r\n", (unsigned long)tc,
+               pulse_mode_name(pulse_param_get()->mode));
+      }
+    }
+
+    /* 非阻塞1秒调度 */
     if (HAL_GetTick() - g_last_tick >= 1000)
     {
       g_last_tick += 1000;

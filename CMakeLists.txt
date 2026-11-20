@@ -49,11 +49,11 @@ else ()
     add_compile_options(-Og -g)
 endif ()
 
-include_directories(Core/Inc Drivers/BSP/OLED Drivers/STM32F1xx_HAL_Driver/Inc/Legacy Drivers/STM32F1xx_HAL_Driver/Inc Drivers/CMSIS/Device/ST/STM32F1xx/Include Drivers/CMSIS/Include)
+include_directories(Core/Inc App Drivers/BSP/OLED Drivers/STM32F1xx_HAL_Driver/Inc/Legacy Drivers/STM32F1xx_HAL_Driver/Inc Drivers/CMSIS/Device/ST/STM32F1xx/Include Drivers/CMSIS/Include)
 
 add_definitions(-DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xE)
 
-file(GLOB_RECURSE SOURCES "Core/*.*" "Drivers/*.*")
+file(GLOB_RECURSE SOURCES "Core/*.*" "Drivers/*.*" "App/*.*")
 
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F103RCTX_FLASH.ld)
 
@@ -71,3 +71,15 @@ add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${PROJECT_NAME}.elf> ${BIN_FILE}
         COMMENT "Building ${HEX_FILE}
 Building ${BIN_FILE}")
+
+# ---- ST-Link 自动烧录: cmake --build cmake-build-debug --target flash ----
+# 注意: 本段由 AI 添加, CubeMX 重新生成 CMakeLists.txt 时会丢失, 需重新追加
+set(STM32_PROGRAMMER_CLI
+    "D:/STM32CubeIDE_2.1.1/STM32CubeIDE/plugins/com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.400.202601091506/tools/bin/STM32_Programmer_CLI.exe")
+
+add_custom_target(flash
+    COMMAND ${STM32_PROGRAMMER_CLI} -c port=SWD mode=UR reset=HWrst
+            -w ${HEX_FILE} -v -rst
+    DEPENDS ${PROJECT_NAME}.elf
+    COMMENT "Flashing ${HEX_FILE} via ST-Link SWD..."
+    USES_TERMINAL)
