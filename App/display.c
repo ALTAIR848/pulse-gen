@@ -115,11 +115,11 @@ static uint8_t main_row_text(char *buf, uint8_t size,
         case PULSE_ROW_TIM_FREQ:
             if (idx == 2u)      /* 同步共享频率行(T3=T4) */
             {
-                return (uint8_t)snprintf(buf, size, "%cT3/4F:%5lu Hz", mark,
+                return (uint8_t)snprintf(buf, size, "%cT3/4F:%6lu Hz", mark,
                                          (unsigned long)p->freq_hz[0]);
             }
 
-            return (uint8_t)snprintf(buf, size, "%cT%uF  :%5lu Hz", mark,
+            return (uint8_t)snprintf(buf, size, "%cT%uF  :%6lu Hz", mark,
                                      (unsigned)(idx + 3u), (unsigned long)p->freq_hz[idx]);
 
         case PULSE_ROW_CH_DUTY:

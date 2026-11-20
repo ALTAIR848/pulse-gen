@@ -29,6 +29,7 @@
 #include "pulse.h"
 #include "key.h"
 #include "display.h"
+#include "pwm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,10 +74,11 @@ static ui_state_t g_ui_state = UI_HOME_BROWSE;
 static pulse_page_t g_page;               /* 主页行列表 */
 static uint8_t g_cursor = 0;              /* 主页光标(页面行索引) */
 static uint8_t g_scroll_top = 0;          /* 主页列表滚动起点 */
-static uint8_t g_ch_cursor = 0;           /* 通道子页光标(0~3通道, 4返回) */
+static uint8_t g_ch_cursor = 0;           /* 通道子页光标(0=Back,1~6通道,7=Sync) */
 static uint8_t g_ch_scroll = 0;           /* 通道子页滚动起点 */
-static pulse_mode_t g_mode_backup;        /* 模式选择前的模式(取消恢复) */
-static pulse_edit_info_t g_edit_info;     /* 编辑信息 */
+static pulse_edit_info_t g_edit_info;     /* 编辑子页信息 */
+static pulse_mode_t g_mode_backup;        /* 进入模式选择前的备份 */
+static pwm_req_t g_pwm_req;               /* PWM 启动请求(编辑/启停时组装) */
 static uint8_t g_display_dirty = 1;       /* 需要刷新显示 */
 /* USER CODE END PV */
 
@@ -88,6 +90,91 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/**
+ * @brief  从业务参数组装 PWM 启动请求
+ */
+static void build_pwm_req(void)
+{
+  const pulse_param_t *p = pulse_param_get();
+  uint8_t i;
+
+  g_pwm_req.sync = p->pwm_sync;
+  g_pwm_req.freq_hz[0] = p->freq_hz[0];
+  g_pwm_req.freq_hz[1] = p->freq_hz[1];
+
+  for (i = 0u; i < PWM_CH_TOTAL; i++)
+  {
+    g_pwm_req.ch_en[i] = p->ch[i].enabled;
+    g_pwm_req.ch_duty[i] = p->ch[i].duty_pct;
+    g_pwm_req.ch_phase[i] = p->ch[i].phase_pct;
+  }
+}
+
+/**
+ * @brief  停止 PWM 输出并同步 PWMEn 标志(UI 显示一致)
+ */
+static void pwm_out_stop(void)
+{
+  pwm_stop();
+
+  if (pulse_param_get()->pwm_enabled)
+  {
+    pulse_pwm_toggle();     /* 置 OFF */
+  }
+}
+
+/**
+ * @brief  尝试启动 PWM 输出: 校验失败不动作(配置恒为可启动合法态)
+ */
+static void pwm_out_start(void)
+{
+  build_pwm_req();
+
+  if (pwm_validate(&g_pwm_req) == 0u)
+  {
+    printf("PWM start: validate FAIL (freq=%lu/%luHz sync=%u)\r\n",
+           (unsigned long)g_pwm_req.freq_hz[0],
+           (unsigned long)g_pwm_req.freq_hz[1], g_pwm_req.sync);
+    return;
+  }
+
+  if (pwm_apply(&g_pwm_req))
+  {
+    printf("PWM start OK: F=%luHz sync=%u CEN3=%u CEN4=%u\r\n",
+           (unsigned long)g_pwm_req.freq_hz[0], g_pwm_req.sync,
+           (unsigned)((TIM3->CR1 & TIM_CR1_CEN) != 0u),
+           (unsigned)((TIM4->CR1 & TIM_CR1_CEN) != 0u));
+    if (!pulse_param_get()->pwm_enabled)
+    {
+      pulse_pwm_toggle();   /* 置 ON */
+    }
+  }
+  else
+  {
+    printf("PWM start: apply FAIL\r\n");
+  }
+}
+
+/**
+ * @brief  按住时长映射为编辑步进倍率: 短按=1, 按住2s后=10, 5s后=100
+ */
+static uint32_t edit_step_mult(key_id_t id)
+{
+  uint32_t hold = key_hold_ms(id);
+
+  if (hold >= 5000u)
+  {
+    return 100u;
+  }
+
+  if (hold >= 2000u)
+  {
+    return 10u;
+  }
+
+  return 1u;
+}
 
 /**
  * @brief  重建主页行列表并钳制光标/滚动位置
@@ -182,14 +269,23 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
         }
         else if (type == (uint8_t)PULSE_ROW_CHSEL)
         {
+          /* 进通道子页前禁用输出(用户约定: 退出后保持停止, 手动PWMEn恢复) */
+          pwm_out_stop();
           g_ch_cursor = 0u;
           g_ch_scroll = 0u;
           g_ui_state = UI_CH_PAGE;
         }
         else if (type == (uint8_t)PULSE_ROW_PWM_EN)
         {
-          /* 布尔项: 确认直接翻转, 不进编辑 */
-          pulse_pwm_toggle();
+          /* 布尔项: 确认直接翻转; ON=按当前参数启动输出 */
+          if (!pulse_param_get()->pwm_enabled)
+          {
+            pwm_out_start();
+          }
+          else
+          {
+            pwm_out_stop();
+          }
         }
         else if (type == (uint8_t)PULSE_ROW_TIM_FREQ ||
                  type == (uint8_t)PULSE_ROW_CH_DUTY ||
@@ -230,7 +326,11 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
       }
       else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_RELEASE_SHORT)
       {
-        /* 锁定 */
+        /* 锁定: 模式有变化则停输出(PWM参数归PWM模式私有) */
+        if (pulse_param_get()->mode != g_mode_backup)
+        {
+          pwm_out_stop();
+        }
         g_ui_state = UI_HOME_BROWSE;
       }
       else if (id == KEY_ID_CONFIRM && ev == KEY_EVENT_LONG)
@@ -286,15 +386,33 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
     case UI_EDIT_PAGE:
       if (move && (id == KEY_ID_UP || id == KEY_ID_DOWN))
       {
-        pulse_edit_step((id == KEY_ID_UP) ? -1 : 1);    /* 上=减 下=加 */
+        pulse_edit_step((id == KEY_ID_UP) ? -1 : 1,    /* 上=减 下=加 */
+                        edit_step_mult(id));           /* 按住越久步进越大 */
         g_edit_info.value = pulse_edit_value();   /* 同步编辑页显示值 */
       }
       else if (id == KEY_ID_CONFIRM)
       {
         if (ev == KEY_EVENT_RELEASE_SHORT)
         {
-          pulse_edit_commit();      /* 保存返回 */
-          g_ui_state = UI_HOME_BROWSE;
+          /* 方案A: 先校验整个PWM配置, 非法则拒绝本次编辑(值回滚) */
+          build_pwm_req();          /* 含刚改过的值 */
+
+          if (pwm_validate(&g_pwm_req))
+          {
+            pulse_edit_commit();    /* 保存返回 */
+            g_ui_state = UI_HOME_BROWSE;
+
+            /* 输出运行中: 停-配-启瞬间切换到新参数 */
+            if (pwm_is_running())
+            {
+              pwm_stop();
+              (void)pwm_apply(&g_pwm_req);
+            }
+          }
+          else
+          {
+            pulse_edit_cancel();    /* 拒绝: 值恢复, 输出继续跑旧参数 */
+          }
         }
         else if (ev == KEY_EVENT_LONG)
         {

@@ -29,48 +29,6 @@ static char s_edit_name[16];
 /* ---- 触发计数 ---- */
 static uint32_t s_trig_count = 0;
 
-/* ---- 1/2/5 序列 ---- */
-static uint32_t seq_next(uint32_t v, uint32_t max)
-{
-    static const uint32_t mant[3] = {1u, 2u, 5u};
-
-    for (uint32_t decade = 1u; decade <= max; decade *= 10u)
-    {
-        for (uint32_t i = 0u; i < 3u; i++)
-        {
-            uint32_t cand = mant[i] * decade;
-
-            if (cand > v && cand <= max)
-            {
-                return cand;
-            }
-        }
-    }
-
-    return v;
-}
-
-static uint32_t seq_prev(uint32_t v, uint32_t min)
-{
-    static const uint32_t mant[3] = {1u, 2u, 5u};
-    uint32_t best = 0u;
-
-    for (uint32_t decade = 1u; decade <= v; decade *= 10u)
-    {
-        for (uint32_t i = 0u; i < 3u; i++)
-        {
-            uint32_t cand = mant[i] * decade;
-
-            if (cand < v && cand >= min && cand > best)
-            {
-                best = cand;
-            }
-        }
-    }
-
-    return (best >= min) ? best : min;
-}
-
 void pulse_param_init(void)
 {
     g_pulse.mode = PULSE_MODE_DUAL;
@@ -275,7 +233,6 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
     const char *unit = "us";
     uint32_t min = 1u;
     uint32_t max = 65535u;
-    uint8_t seq = 1u;       /* 时间/频率类参数用 1/2/5 序列 */
 
     switch ((pulse_row_type_t)row_type)
     {
@@ -314,7 +271,6 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
             info->value = g_pulse.ch[idx].duty_pct;
             info->min = 0u;
             info->max = PULSE_DUTY_MAX;
-            info->seq_step = 0u;
             s_edit_ptr = 0;
             s_edit_backup = g_pulse.ch[idx].duty_pct;
             s_edit_row_kind = (uint8_t)PULSE_ROW_CH_DUTY;
@@ -334,7 +290,6 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
             info->value = g_pulse.ch[idx].phase_pct;
             info->min = 0u;
             info->max = PULSE_PHASE_MAX;
-            info->seq_step = 0u;
             s_edit_ptr = 0;
             s_edit_backup = g_pulse.ch[idx].phase_pct;
             s_edit_row_kind = (uint8_t)PULSE_ROW_CH_PHASE;
@@ -389,7 +344,6 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
     info->value = *ptr;
     info->min = min;
     info->max = max;
-    info->seq_step = seq;
     s_edit_ptr = ptr;
     s_edit_backup = *ptr;
     s_edit_row_kind = row_type;
@@ -398,13 +352,20 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
 }
 
 /**
- * @brief  编辑中步进: seq_step=1 用1/2/5序列, 否则±1线性, 均钳制
+ * @brief  编辑中步进: 线性 ±(1*mult), 钳制在[min,max]
+ * @param  dir: +1增大 / -1减小
+ * @param  mult: 步进倍率(按住加速用, 1/10/100); 小范围参数(百分比)自动封顶10
  */
-void pulse_edit_step(int8_t dir)
+void pulse_edit_step(int8_t dir, uint32_t mult)
 {
     if (!s_edit_active)
     {
         return;
+    }
+
+    if (mult == 0u)
+    {
+        mult = 1u;
     }
 
     if ((s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY) ||
@@ -413,7 +374,8 @@ void pulse_edit_step(int8_t dir)
         pulse_ch_t *ch = &g_pulse.ch[s_edit_idx];
         uint8_t *pv = (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY) ? &ch->duty_pct : &ch->phase_pct;
         uint32_t max = (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY) ? PULSE_DUTY_MAX : PULSE_PHASE_MAX;
-        int32_t v = (int32_t)*pv + (int32_t)dir;
+        uint32_t m = (mult > 10u) ? 10u : mult;     /* 0~100 范围, 倍率封顶10 */
+        int32_t v = (int32_t)*pv + (int32_t)dir * (int32_t)m;
 
         if (v < 0)
         {
@@ -434,14 +396,17 @@ void pulse_edit_step(int8_t dir)
         uint32_t max = (s_edit_ptr == &g_pulse.freq_hz[0] || s_edit_ptr == &g_pulse.freq_hz[1] ||
                         s_edit_ptr == &g_pulse.cs_freq_hz)
                        ? PULSE_FREQ_MAX : 65535u;
+        uint32_t step = (mult > max) ? max : mult;
 
         if (dir > 0)
         {
-            *s_edit_ptr = seq_next(*s_edit_ptr, max);
+            uint32_t v = *s_edit_ptr + step;
+
+            *s_edit_ptr = (v > max) ? max : v;
         }
         else
         {
-            *s_edit_ptr = seq_prev(*s_edit_ptr, 1u);
+            *s_edit_ptr = (*s_edit_ptr > step) ? (*s_edit_ptr - step) : 1u;
         }
     }
 }

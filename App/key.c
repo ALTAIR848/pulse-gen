@@ -7,7 +7,27 @@
 #define KEY_DEBOUNCE_MS     20u     /* 去抖时间 */
 #define KEY_LONG_MS         1000u   /* 长按判定 */
 #define KEY_REPEAT_DELAY_MS 400u    /* 连发起始延时 */
-#define KEY_REPEAT_PERIOD_MS 150u   /* 连发周期 */
+
+/* 连发周期按住时长自适应: 按得越久发得越快(档位间隔较大, 提速平缓) */
+static uint32_t repeat_interval(uint32_t hold_ms)
+{
+    if (hold_ms < 2000u)
+    {
+        return 150u;
+    }
+
+    if (hold_ms < 4000u)
+    {
+        return 90u;
+    }
+
+    if (hold_ms < 7000u)
+    {
+        return 50u;
+    }
+
+    return 30u;
+}
 
 typedef struct
 {
@@ -98,7 +118,7 @@ key_event_t key_scan(key_id_t *out_id)
                 }
 
                 if ((now - k->t_press >= KEY_REPEAT_DELAY_MS) &&
-                        (now - k->t_last_repeat >= KEY_REPEAT_PERIOD_MS))
+                        (now - k->t_last_repeat >= repeat_interval(now - k->t_press)))
                 {
                     k->t_last_repeat = now;
                     *out_id = (key_id_t)i;
@@ -114,4 +134,14 @@ key_event_t key_scan(key_id_t *out_id)
     }
 
     return KEY_EVENT_NONE;
+}
+
+uint32_t key_hold_ms(key_id_t id)
+{
+    if ((uint32_t)id < (uint32_t)KEY_ID_COUNT && g_keys[id].state == 2u)
+    {
+        return HAL_GetTick() - g_keys[id].t_press;
+    }
+
+    return 0u;
 }

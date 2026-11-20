@@ -33,7 +33,7 @@ typedef enum
 
 #define PULSE_TIM_COUNT     2u
 #define PULSE_FREQ_MIN      1u
-#define PULSE_FREQ_MAX      10000u
+#define PULSE_FREQ_MAX      100000u
 #define PULSE_DUTY_MAX      100u    /* 占空比 0~100% */
 #define PULSE_PHASE_MAX     99u     /* 相位 0~99% */
 
@@ -105,7 +105,6 @@ typedef struct
     uint32_t value;
     uint32_t min;
     uint32_t max;
-    uint8_t seq_step;       /* 1=1/2/5序列步进, 0=±1线性步进 */
 } pulse_edit_info_t;
 
 /* ---- API ---- */
@@ -122,7 +121,7 @@ const char *pulse_ch_name(uint8_t ch_idx);      /* 短名 T1C1 */
 const char *pulse_ch_name_full(uint8_t ch_idx); /* 全名 TIM1_CH1 */
 
 uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info); /* 1=成功 */
-void pulse_edit_step(int8_t dir);               /* 编辑中修改值(步进+钳制) */
+void pulse_edit_step(int8_t dir, uint32_t mult); /* 编辑中修改值: ±(1*mult), 钳制 */
 uint32_t pulse_edit_value(void);                /* 当前编辑中的值(刷新显示用) */
 void pulse_edit_cancel(void);                   /* 取消, 恢复进入编辑前的值 */
 void pulse_edit_commit(void);                   /* 保存(值已实时生效, 预留FLASH写入点) */
