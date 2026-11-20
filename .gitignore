@@ -1,0 +1,8 @@
+cmake-build-debug
+cmake-build-release
+.settings
+.idea
+.vscode
+.workbuddy
+Debug
+Release
