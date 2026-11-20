@@ -21,7 +21,17 @@
 #include "usart.h"
 
 /* USER CODE BEGIN 0 */
+#include <stdio.h>
 
+/**
+ * @brief  printf重定向: newlib的_write最终逐字符调用__io_putchar
+ * @note   阻塞发送, 单字符超时0xFFFF ticks
+ */
+int __io_putchar(int ch)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 0xFFFF);
+  return ch;
+}
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;

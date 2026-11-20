@@ -23,7 +23,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include "oled.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,7 +52,9 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static uint32_t g_last_tick = 0;   /* 上次1秒任务执行时刻 */
+static uint32_t g_uptime_s = 0;    /* 开机以来的秒数 */
+static char g_line[24];            /* 显示/打印用的临时行缓冲 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,6 +65,31 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/**
+ * @brief  每1秒执行一次的任务: 刷新OLED显示 + 串口打印
+ */
+static void app_1s_task(void)
+{
+  g_uptime_s++;
+
+  /* LED0 每2秒翻转一次, 作为心跳指示 */
+  if (g_uptime_s % 2 == 0)
+  {
+    LED0_BLINK();
+  }
+
+  /* 串口打印 */
+  snprintf(g_line, sizeof(g_line), "Hello, uptime: %lu s\r\n",
+           (unsigned long)g_uptime_s);
+  printf("%s", g_line);
+
+  /* OLED显示 */
+  oled_show_string(0, 0, "Hello", 16);
+  snprintf(g_line, sizeof(g_line), "Up: %lu s ", (unsigned long)g_uptime_s);
+  oled_show_string(0, 16, g_line, 16);
+  oled_refresh_gram();
+}
 
 /* USER CODE END 0 */
 
@@ -97,14 +125,24 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   LED1_OFF();
+  oled_init();
+  printf("pulse-gen started\r\n");
+
+  app_1s_task();           /* 上电立即执行一次 */
+  g_last_tick = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    HAL_Delay(1000);
-    LED0_BLINK();
+    /* 非阻塞1秒调度, 便于以后加入按键扫描和脉冲控制 */
+    if (HAL_GetTick() - g_last_tick >= 1000)
+    {
+      g_last_tick += 1000;
+      app_1s_task();
+    }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
