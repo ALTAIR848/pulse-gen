@@ -88,6 +88,10 @@ static uint8_t main_row_text(char *buf, uint8_t size,
             return (uint8_t)snprintf(buf, size, "%cP2   :%5lu us", mark,
                                      (unsigned long)p->dual_p2_us);
 
+        case PULSE_ROW_CS_EN:
+            return (uint8_t)snprintf(buf, size, "%cClrEn:%-3s", mark,
+                                     p->cs_enabled ? "ON" : "OFF");
+
         case PULSE_ROW_CS_FREQ:
             return (uint8_t)snprintf(buf, size, "%cFreq :%5lu Hz", mark,
                                      (unsigned long)p->cs_freq_hz);

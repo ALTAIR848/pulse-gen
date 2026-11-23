@@ -39,4 +39,17 @@ uint8_t pwm_fire_dual(uint32_t p1_us, uint32_t gap_us, uint32_t p2_us);
 uint8_t pwm_oneshot_active(void);               /* 1=双脉冲序列运行中 */
 uint8_t pwm_oneshot_poll(void);                 /* 主循环轮询, 序列刚完成返回1(内部收尾强制低) */
 
+/* ---- 清零+单脉冲(参照 jxps-deep-osc sync_and_reset_set 架构) ----
+ * T3主连续: CH1=清零信号(周期起点高电平clrw); CH3仅内部OC3REF不输出引脚,
+ *           上升沿@clrw+clri 经 TRGO=OC3REF -> ITR2 触发 T4
+ * T4从(TRIGGER+OPM): 触发沿出单脉冲(高电平pulse_w), 计满自停;
+ *           平时卸装(SMS=DISABLE), fire时装载, 完成后(更新中断)再卸装
+ *           -> 一次触发正好一个单脉冲, 与清零流同步 */
+uint8_t pwm_cs_validate(uint32_t freq_hz, uint32_t clrw_us, uint32_t clri_us,
+                        uint32_t pulse_us);     /* 1=合法(纯计算不碰硬件) */
+void pwm_cs_apply(uint32_t freq_hz, uint32_t clrw_us, uint32_t clri_us,
+                  uint32_t pulse_us, uint8_t clr_en);   /* 停-配-启; clr_en=1启动清零流 */
+uint8_t pwm_cs_fire(void);      /* 1=已武装(下一清零周期出一个单脉冲); 清零未运行/武装中=0丢弃 */
+uint8_t pwm_cs_poll(void);      /* 主循环轮询, 单脉冲刚完成返回1(内部已卸装) */
+
 #endif /* __PWM_H */

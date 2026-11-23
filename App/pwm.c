@@ -83,7 +83,7 @@ static uint8_t pwm_cal_arr(uint32_t freq, uint32_t *pPSC, uint32_t *pARR)
 }
 
 /* ---- 带参初始化(拷贝自生成的 MX_TIM3/4_Init, PSC/ARR 参数化) ---- */
-static void pwm_tim3_init(uint32_t psc, uint32_t arr)
+static void pwm_tim3_init(uint32_t psc, uint32_t arr, uint32_t trgo)
 {
     TIM_ClockConfigTypeDef sClockSourceConfig = {0};
     TIM_MasterConfigTypeDef sMasterConfig = {0};
@@ -101,7 +101,8 @@ static void pwm_tim3_init(uint32_t psc, uint32_t arr)
     (void)HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig);
     (void)HAL_TIM_OC_Init(&htim3);
 
-    sMasterConfig.MasterOutputTrigger = TIM_TRGO_ENABLE;
+    /* TRGO 按模式选择: PWM/双脉冲=ENABLE(同步启动), 清零+单脉冲=OC3REF(CH3内部参考) */
+    sMasterConfig.MasterOutputTrigger = trgo;
     sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_ENABLE;
     (void)HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig);
 
@@ -389,6 +390,13 @@ void pwm_stop(void)
      * 通道冻结在最后一拍电平上(v3.3.4实测PWM输出全高) */
     TIM3->CR1 &= ~TIM_CR1_OPM;
     TIM4->CR1 &= ~TIM_CR1_OPM;
+    /* 清T4更新中断: 清零+单脉冲模式的完成通知用UIE, 其他模式必须卸下,
+     * 否则T4计满(或残留UIF)会持续进中断 */
+    __HAL_TIM_DISABLE_IT(&htim4, TIM_IT_UPDATE);
+    TIM4->SR = (uint16_t)~TIM_SR_UIF;
+    /* 同理清T3 CC3中断(清零+单脉冲武装用), 防止残留到其他模式误触发 */
+    __HAL_TIM_DISABLE_IT(&htim3, TIM_DIER_CC3IE);
+    TIM3->SR = (uint16_t)~TIM_SR_CC3IF;
     s_running = 0u;
 }
 
@@ -405,7 +413,7 @@ uint8_t pwm_apply(const pwm_req_t *req)
     pwm_stop();
 
     /* 初始化定时器(先从后主启动前的准备) */
-    pwm_tim3_init(s_plan.psc[0], s_plan.arr[0]);
+    pwm_tim3_init(s_plan.psc[0], s_plan.arr[0], TIM_TRGO_ENABLE);
     pwm_tim4_init(s_plan.psc[1], s_plan.arr[1], (req->sync != 0u) ? 1u : 0u);
 
     /* 逐通道配置 */
@@ -608,7 +616,7 @@ uint8_t pwm_fire_dual(uint32_t p1_us, uint32_t gap_us, uint32_t p2_us)
 
     pwm_stop();             /* 确保干净(双脉冲模式下输出通常已停) */
 
-    pwm_tim3_init(psc, arr);
+    pwm_tim3_init(psc, arr, TIM_TRGO_ENABLE);
     pwm_tim4_init(psc, arr, 2u);    /* 双脉冲: T4触发从模式, 由T3的TRGO硬件同步起振 */
 
     s_dual_seq[0] = (uint16_t)f1;
@@ -696,4 +704,264 @@ uint8_t pwm_oneshot_poll(void)
     pwm_stop();
     s_oneshot = 0u;
     return 1u;
+}
+
+/* ---- 清零+单脉冲模式(架构参照 jxps-deep-osc sync_and_reset_set) ----
+ * T3 主连续(无OPM): CH1=清零信号(PWM1: 周期起点高电平clrw, 之后低);
+ *                   CH3 仅内部OC3REF(PWM2: 低->@ccr3翻高), CCR3=clrw+clri,
+ *                   不使能CC3E(引脚不输出), OC3REF上升沿经TRGO=OC3REF(MMS=101)
+ *                   -> ITR2 硬件触发 T4; CH4 强制低不参与
+ * T4 从 TRIGGER(ITR2)+OPM: 触发沿从0计数, 1tick后输出高电平pulse_w,
+ *                   计到ARR自停(CEN清零)。
+ * 卸装机制: 平时SMS=DISABLE(T4不响应触发); fire时装载TRIGGER+CEN=1,
+ *   完成后(更新中断, 比下一周期触发沿早得多)立刻卸装回DISABLE ->
+ *   保证一次触发正好一个单脉冲, 且无主循环轮询窗口期的重触发竞态 */
+#define PWM_US_TICK(us, psc)    (((us) * (PWM_TIM_CLOCK_HZ / 1000000u) + (psc) / 2u) / (psc))
+
+static uint8_t s_cs_armed = 0;      /* 1=T4已武装(等待CC3中断启动) */
+static uint8_t s_cs_clr_on = 0;     /* 1=清零信号流运行中 */
+static volatile uint8_t s_cs_done = 0;  /* ISR置位: 单脉冲完成, 供主循环打印 */
+
+uint8_t pwm_cs_validate(uint32_t freq_hz, uint32_t clrw_us, uint32_t clri_us,
+                        uint32_t pulse_us)
+{
+    uint32_t psc3;
+    uint32_t arr3;
+    uint32_t w3;
+    uint32_t i3;
+    uint32_t p3;
+    uint32_t psc4 = 1u;
+    uint32_t arr4;
+
+    if ((freq_hz < PWM_FREQ_MIN) || (freq_hz > PWM_FREQ_MAX))
+    {
+        return 0u;
+    }
+
+    if (pwm_cal_arr(freq_hz, &psc3, &arr3) == 0u)
+    {
+        return 0u;
+    }
+
+    /* 清零脉宽/间隔在T3时基上, 至少1个tick(CCR=0会持续匹配) */
+    w3 = PWM_US_TICK(clrw_us, psc3);
+    i3 = PWM_US_TICK(clri_us, psc3);
+
+    if ((w3 == 0u) || (i3 == 0u))
+    {
+        return 0u;
+    }
+
+    /* 单脉冲脉宽在T4时基上(独立PSC); 装进周期检查用T3 tick折算 */
+    p3 = PWM_US_TICK(pulse_us, psc3);
+
+    if (p3 == 0u)
+    {
+        p3 = 1u;        /* 低于T3分辨率: 必然装得下, 按1tick计 */
+    }
+
+    /* 清零+间隔+脉冲+余量 必须装进一个周期, 否则下一周期触发沿截断脉冲 */
+    if ((w3 + i3 + p3 + 2u) > arr3)
+    {
+        return 0u;
+    }
+
+    /* T4: 最小分频使 脉宽+延时1tick 装进16位计数器 */
+    for (;;)
+    {
+        arr4 = 1u + PWM_US_TICK(pulse_us, psc4);
+
+        if (arr4 <= 65530u)
+        {
+            break;
+        }
+
+        psc4++;
+
+        if (psc4 > 65536u)
+        {
+            return 0u;
+        }
+    }
+
+    return 1u;
+}
+
+void pwm_cs_apply(uint32_t freq_hz, uint32_t clrw_us, uint32_t clri_us,
+                  uint32_t pulse_us, uint8_t clr_en)
+{
+    uint32_t psc3;
+    uint32_t arr3;
+    uint32_t psc4 = 1u;
+    uint32_t arr4;
+    uint32_t w3;
+    uint32_t ccr3;
+    TIM_OC_InitTypeDef oc = {0};
+
+    if (pwm_cs_validate(freq_hz, clrw_us, clri_us, pulse_us) == 0u)
+    {
+        return;
+    }
+
+    pwm_stop();
+    s_cs_armed = 0u;
+    s_cs_done = 0u;
+
+    (void)pwm_cal_arr(freq_hz, &psc3, &arr3);
+    w3 = PWM_US_TICK(clrw_us, psc3);
+    ccr3 = w3 + PWM_US_TICK(clri_us, psc3);
+
+    /* 中断开销补偿: CC3比较中断从比较点到置位T4 CEN实测固定开销,
+     * 按用户标定取1.5us, 触发点前移该值, 使T4实际启动落在设定的间隔点上 */
+    {
+        uint32_t comp = (3u * (PWM_TIM_CLOCK_HZ / 2000000u) + psc3 - 1u) / psc3;
+        /* 1.5us = 108 tick@psc1, 向上取整除以psc3 */
+
+        /* 保护边界放宽: 只要不减成负数就应用全额补偿(小间隔时触发点可
+         * 落在清零脉宽内, 由ISR固定2.0us延迟自然推回, 用户确认可接受) */
+        if (ccr3 > comp)
+        {
+            ccr3 -= comp;
+        }
+        else
+        {
+            ccr3 = 1u;
+        }
+    }
+
+    for (;;)
+    {
+        arr4 = 1u + PWM_US_TICK(pulse_us, psc4);
+
+        if (arr4 <= 65530u)
+        {
+            break;
+        }
+
+        psc4++;
+    }
+
+    printf(">> CS apply F=%luHz psc3=%lu arr3=%lu w=%lu ccr3=%lu | psc4=%lu arr4=%lu clr=%u\r\n",
+           (unsigned long)freq_hz, (unsigned long)psc3, (unsigned long)arr3,
+           (unsigned long)w3, (unsigned long)ccr3,
+           (unsigned long)psc4, (unsigned long)arr4, clr_en);
+
+    /* T3: TRGO=OC3REF(CH3内部参考信号作触发源) */
+    pwm_tim3_init(psc3, arr3, TIM_TRGO_OC3REF);
+
+    /* T4: 卸装态初始化(SMS=DISABLE不响应触发), 单脉冲模式计满自停 */
+    pwm_tim4_init(psc4, arr4, 0u);
+    TIM4->CR1 |= TIM_CR1_OPM;
+
+    /* T3 CH1 清零信号: PWM1, 周期起点高电平w3(clrw), 之后低; CC1E沿用stop置位 */
+    oc.OCMode = TIM_OCMODE_PWM1;
+    oc.Pulse = (uint16_t)w3;
+    oc.OCPolarity = TIM_OCPOLARITY_HIGH;
+    oc.OCFastMode = TIM_OCFAST_DISABLE;
+    (void)HAL_TIM_OC_ConfigChannel(&htim3, &oc, TIM_CHANNEL_1);
+
+    /* T3 CH3: 仅内部OC3REF(上升沿@ccr3=clrw+clri), 不使能CC3E(引脚不输出).
+     * 注: TRGO=OC3REF走T4触发从模式的方案(v3.5.1/3.5.3)实测不可靠 --
+     * PWM2时触发线大部分时间为高(武装即触发), PWM1时(3.5.3)触发时刻随机,
+     * F1从机触发模式对电平型内部触发源的边沿检测不可信, 弃用.
+     * 最终方案: T4 SMS=DISABLE, 用T3 CC3比较中断在触发时刻软件启动T4.
+     * PWM2下OC3REF在ccr3翻高, CC3IF在CNT=ccr3的比较时刻置位, 时点一致 */
+    oc.OCMode = TIM_OCMODE_PWM2;
+    oc.Pulse = (uint16_t)ccr3;
+    (void)HAL_TIM_OC_ConfigChannel(&htim3, &oc, TIM_CHANNEL_3);
+    TIM_CCxChannelCmd(TIM3, TIM_CHANNEL_3, TIM_CCx_DISABLE);
+    TIM_CHANNEL_STATE_SET(&htim3, TIM_CHANNEL_3, HAL_TIM_CHANNEL_STATE_READY);
+    /* CH4: stop已FORCED_INACTIVE+CCxE(恒低), 保持不参与 */
+
+    /* T4 CH1/2/3: PWM2, CCR=1tick(延时) -> 高电平脉宽=ARR-1=pulse_w
+     * 卸装态CNT=0恒低于PWM2的CCR(=1), 引脚保持低; 武装后触发沿才开始计数 */
+    oc.OCMode = TIM_OCMODE_PWM2;
+    oc.Pulse = 1u;
+
+    for (uint32_t j = 3u; j < PWM_CH_TOTAL; j++)
+    {
+        (void)HAL_TIM_OC_ConfigChannel(s_map[j].htim, &oc, s_map[j].ch);
+        TIM_CCxChannelCmd(s_map[j].htim->Instance, s_map[j].ch, TIM_CCx_ENABLE);
+    }
+
+    /* 更新中断: 单脉冲计满(OPM停机)时立即卸装, 早于下一周期触发沿 */
+    TIM4->SR = (uint16_t)~TIM_SR_UIF;
+    __HAL_TIM_ENABLE_IT(&htim4, TIM_IT_UPDATE);
+    HAL_NVIC_SetPriority(TIM4_IRQn, 1u, 0u);
+    HAL_NVIC_EnableIRQ(TIM4_IRQn);
+
+    /* 启动: clr_en=1时T3连续运行产生清零流; T4保持卸装等待fire */
+    s_cs_clr_on = clr_en;
+
+    if (clr_en != 0u)
+    {
+        pwm_timer_enable(&htim3);
+    }
+
+    s_running = clr_en;
+}
+
+uint8_t pwm_cs_fire(void)
+{
+    if ((s_cs_clr_on == 0u) || (s_cs_armed != 0u))
+    {
+        return 0u;      /* 清零流未运行 / 已武装: 丢弃 */
+    }
+
+    /* v3.5.2 最终方案: 只武装不启动T4. T3 CC3 比较中断在触发时刻
+     * (ccr3=clr_w+clr_i)软件启动T4计数, 见 TIM3_IRQHandler.
+     * 不用T4触发从模式: 实测F1对TRGO=OC3REF电平源边沿检测不可靠
+     * (v3.5.1武装即触发/v3.5.3触发时刻随机, 见apply处注释) */
+    TIM3->SR = (uint16_t)~TIM_SR_CC3IF;         /* 清残留标志, 只等下一次比较 */
+    __HAL_TIM_ENABLE_IT(&htim3, TIM_DIER_CC3IE);
+    HAL_NVIC_SetPriority(TIM3_IRQn, 1u, 0u);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+
+    s_cs_armed = 1u;
+    return 1u;
+}
+
+uint8_t pwm_cs_poll(void)
+{
+    if (s_cs_done == 0u)
+    {
+        return 0u;
+    }
+
+    s_cs_done = 0u;
+    return 1u;
+}
+
+/* T3 CC3比较中断: 武装状态下在触发时刻(ccr3=clr_w+clr_i)软件启动T4计数.
+ * T4 SMS保持DISABLE(不依赖触发沿检测, 无"使能时已高"竞态), OPM计满自停. */
+void TIM3_IRQHandler(void)
+{
+    if ((TIM3->SR & TIM_SR_CC3IF) != 0u)
+    {
+        TIM3->SR = (uint16_t)~TIM_SR_CC3IF;
+
+        if ((s_cs_armed != 0u) && (s_cs_clr_on != 0u))
+        {
+            __HAL_TIM_DISABLE_IT(&htim3, TIM_DIER_CC3IE);   /* 一次触发一个脉冲 */
+
+            TIM4->CNT = 0u;
+            TIM4->SR = 0u;
+            TIM4->CR1 |= TIM_CR1_CEN;       /* T4开始计数出单脉冲 */
+        }
+    }
+}
+
+/* T4更新中断: 单脉冲计满(OPM自动清CEN), 收尾武装状态 */
+void TIM4_IRQHandler(void)
+{
+    if ((TIM4->SR & TIM_SR_UIF) != 0u)
+    {
+        TIM4->SR = (uint16_t)~TIM_SR_UIF;
+
+        if (s_cs_armed != 0u)
+        {
+            s_cs_armed = 0u;
+            s_cs_done = 1u;
+        }
+    }
 }

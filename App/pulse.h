@@ -60,6 +60,7 @@ typedef struct
     uint32_t dual_p2_us;                    /* 脉冲2宽度 */
 
     /* 清零+单脉冲模式 */
+    uint8_t cs_enabled;                     /* 清零信号使能(进模式默认OFF, 切出自动OFF) */
     uint32_t cs_freq_hz;                    /* 清零脉冲频率 */
     uint32_t cs_clrw_us;                    /* 清零脉冲宽度 */
     uint32_t cs_clri_us;                    /* 清零脉冲间隔 */
@@ -78,6 +79,7 @@ typedef enum
     PULSE_ROW_DUAL_P1,      /* 双脉冲: 脉冲1宽度us */
     PULSE_ROW_DUAL_GAP,     /* 双脉冲: 间隔us */
     PULSE_ROW_DUAL_P2,      /* 双脉冲: 脉冲2宽度us */
+    PULSE_ROW_CS_EN,        /* 清零+单脉冲: 清零信号使能(布尔, 确认直接翻转) */
     PULSE_ROW_CS_FREQ,      /* 清零+单脉冲: 频率Hz */
     PULSE_ROW_CS_CLRW,      /* 清零+单脉冲: 清零脉冲宽度us */
     PULSE_ROW_CS_CLRI,      /* 清零+单脉冲: 清零间隔us */
@@ -115,6 +117,8 @@ void pulse_param_set_mode(pulse_mode_t m);      /* 只切模式, 各模式参数
 void pulse_ch_toggle(uint8_t ch_idx);           /* 通道勾选翻转 */
 void pulse_pwm_toggle(void);                    /* PWM总使能翻转 */
 void pulse_sync_toggle(void);                   /* T2/T3频率同步翻转 */
+void pulse_cs_toggle(void);                     /* 清零信号使能翻转 */
+void pulse_cs_disable(void);                    /* 清零信号强制禁用(切出模式时) */
 
 void pulse_build_main_page(pulse_page_t *page); /* 按当前模式生成主页行列表 */
 const char *pulse_mode_name(pulse_mode_t m);

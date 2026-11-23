@@ -122,6 +122,29 @@ static void pwm_out_stop(void)
   {
     pulse_pwm_toggle();     /* 置 OFF */
   }
+
+  pulse_cs_disable();       /* 清零信号同步禁用(切模式/进子页时UI一致) */
+}
+
+/**
+ * @brief  尝试启动清零+单脉冲输出(校验失败不动作)
+ * @return 1=已应用, 0=校验失败
+ */
+static uint8_t cs_out_apply(void)
+{
+  const pulse_param_t *p = pulse_param_get();
+
+  if (pwm_cs_validate(p->cs_freq_hz, p->cs_clrw_us, p->cs_clri_us, p->cs_pulse_us) == 0u)
+  {
+    printf("CS apply: validate FAIL (F=%lu ClrW=%lu ClrI=%lu Pulse=%lu)\r\n",
+           (unsigned long)p->cs_freq_hz, (unsigned long)p->cs_clrw_us,
+           (unsigned long)p->cs_clri_us, (unsigned long)p->cs_pulse_us);
+    return 0u;
+  }
+
+  pwm_cs_apply(p->cs_freq_hz, p->cs_clrw_us, p->cs_clri_us, p->cs_pulse_us,
+               p->cs_enabled);
+  return 1u;
 }
 
 /**
@@ -287,6 +310,23 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
             pwm_out_stop();
           }
         }
+        else if (type == (uint8_t)PULSE_ROW_CS_EN)
+        {
+          /* 清零使能: ON=启动清零流(T3连续+触发链); OFF=全停 */
+          pulse_cs_toggle();
+
+          if (pulse_param_get()->cs_enabled)
+          {
+            if (cs_out_apply() == 0u)
+            {
+              pulse_cs_toggle();    /* 校验失败回滚, 保持OFF */
+            }
+          }
+          else
+          {
+            pwm_stop();             /* 全停(含武装中的T4) */
+          }
+        }
         else if (type == (uint8_t)PULSE_ROW_TIM_FREQ ||
                  type == (uint8_t)PULSE_ROW_CH_DUTY ||
                  type == (uint8_t)PULSE_ROW_CH_PHASE ||
@@ -319,6 +359,18 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
           else if (pp->mode == PULSE_MODE_DUAL)
           {
             printf(">> Dual fire FAIL (busy/resolution)\r\n");
+          }
+          else if (pp->mode == PULSE_MODE_CLEAR_SINGLE)
+          {
+            /* 清零+单脉冲: 武装T4, 下一清零周期的clrw+clri处出一个单脉冲 */
+            if (pwm_cs_fire())
+            {
+              pulse_trigger_fire();
+            }
+            else
+            {
+              printf(">> CS fire FAIL (ClrEn off / busy)\r\n");
+            }
           }
           else
           {
@@ -428,24 +480,49 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
       {
         if (ev == KEY_EVENT_RELEASE_SHORT)
         {
-          /* 方案A: 先校验整个PWM配置, 非法则拒绝本次编辑(值回滚) */
-          build_pwm_req();          /* 含刚改过的值 */
+          const pulse_param_t *pe = pulse_param_get();
 
-          if (pwm_validate(&g_pwm_req))
+          if (pe->mode == PULSE_MODE_CLEAR_SINGLE)
           {
-            pulse_edit_commit();    /* 保存返回 */
-            g_ui_state = UI_HOME_BROWSE;
-
-            /* 输出运行中: 停-配-启瞬间切换到新参数 */
-            if (pwm_is_running())
+            /* CS模式: 独立校验(clear+interval+pulse须装进一个周期) */
+            if (pwm_cs_validate(pe->cs_freq_hz, pe->cs_clrw_us,
+                                pe->cs_clri_us, pe->cs_pulse_us))
             {
-              pwm_stop();
-              (void)pwm_apply(&g_pwm_req);
+              pulse_edit_commit();    /* 保存返回 */
+              g_ui_state = UI_HOME_BROWSE;
+
+              /* 清零流运行中: 停-配-启切到新参数(保持使能标志) */
+              if (pwm_is_running() && pe->cs_enabled)
+              {
+                (void)cs_out_apply();
+              }
+            }
+            else
+            {
+              pulse_edit_cancel();    /* 拒绝: 值恢复, 输出继续跑旧参数 */
             }
           }
           else
           {
-            pulse_edit_cancel();    /* 拒绝: 值恢复, 输出继续跑旧参数 */
+            /* PWM/双脉冲: 方案A, 校验整个PWM配置, 非法则拒绝本次编辑(值回滚) */
+            build_pwm_req();          /* 含刚改过的值 */
+
+            if (pwm_validate(&g_pwm_req))
+            {
+              pulse_edit_commit();    /* 保存返回 */
+              g_ui_state = UI_HOME_BROWSE;
+
+              /* 输出运行中: 停-配-启瞬间切换到新参数 */
+              if (pwm_is_running())
+              {
+                pwm_stop();
+                (void)pwm_apply(&g_pwm_req);
+              }
+            }
+            else
+            {
+              pulse_edit_cancel();    /* 拒绝: 值恢复, 输出继续跑旧参数 */
+            }
           }
         }
         else if (ev == KEY_EVENT_LONG)
@@ -602,6 +679,12 @@ int main(void)
     if (pwm_oneshot_poll())
     {
       printf(">> Dual done\r\n");
+    }
+
+    /* 清零+单脉冲完成检测(更新中断已卸装, 此处仅打印) */
+    if (pwm_cs_poll())
+    {
+      printf(">> CS pulse done\r\n");
     }
 
     /* 非阻塞1秒调度 */

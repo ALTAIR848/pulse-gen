@@ -54,10 +54,11 @@ void pulse_param_init(void)
     g_pulse.dual_p2_us = 10u;
 
     /* 清零+单脉冲默认值 */
+    g_pulse.cs_enabled = 0u;        /* 进模式默认禁用清零 */
     g_pulse.cs_freq_hz = 1000u;
-    g_pulse.cs_clrw_us = 100u;
-    g_pulse.cs_clri_us = 1000u;
-    g_pulse.cs_pulse_us = 50u;
+    g_pulse.cs_clrw_us = 10u;
+    g_pulse.cs_clri_us = 10u;
+    g_pulse.cs_pulse_us = 10u;
 }
 
 const pulse_param_t *pulse_param_get(void)
@@ -89,6 +90,16 @@ void pulse_pwm_toggle(void)
 void pulse_sync_toggle(void)
 {
     g_pulse.pwm_sync = !g_pulse.pwm_sync;
+}
+
+void pulse_cs_toggle(void)
+{
+    g_pulse.cs_enabled = !g_pulse.cs_enabled;
+}
+
+void pulse_cs_disable(void)
+{
+    g_pulse.cs_enabled = 0u;
 }
 
 const char *pulse_mode_name(pulse_mode_t m)
@@ -206,13 +217,13 @@ void pulse_build_main_page(pulse_page_t *page)
     }
     else    /* 清零+单脉冲 */
     {
-        static const uint8_t rows[5] = {
+        static const uint8_t rows[6] = {
+            (uint8_t)PULSE_ROW_CS_EN, (uint8_t)PULSE_ROW_TRIGGER,
             (uint8_t)PULSE_ROW_CS_FREQ, (uint8_t)PULSE_ROW_CS_CLRW,
-            (uint8_t)PULSE_ROW_CS_CLRI, (uint8_t)PULSE_ROW_CS_PULSE,
-            (uint8_t)PULSE_ROW_TRIGGER
+            (uint8_t)PULSE_ROW_CS_CLRI, (uint8_t)PULSE_ROW_CS_PULSE
         };
 
-        for (uint32_t i = 0u; i < 5u; i++)
+        for (uint32_t i = 0u; i < 6u; i++)
         {
             page->row[page->count].type = rows[i];
             page->row[page->count].idx = 0u;
