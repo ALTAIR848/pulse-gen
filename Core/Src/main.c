@@ -106,7 +106,7 @@ static void build_pwm_req(void)
   for (i = 0u; i < PWM_CH_TOTAL; i++)
   {
     g_pwm_req.ch_en[i] = p->ch[i].enabled;
-    g_pwm_req.ch_duty[i] = p->ch[i].duty_pct;
+    g_pwm_req.ch_duty[i] = p->ch[i].duty_bp;
     g_pwm_req.ch_phase[i] = p->ch[i].phase_pct;
   }
 }
@@ -305,8 +305,25 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
         }
         else if (type == (uint8_t)PULSE_ROW_TRIGGER)
         {
-          /* 触发脉冲: 确认一次触发一次 */
-          pulse_trigger_fire();
+          /* 触发脉冲: 确认一次触发一次
+           * 双脉冲模式 = 真触发(固定全通道齐发 P1/Gap/P2, 运行中丢弃;
+           *              PWM模式的通道勾选仅作用于PWM模式)
+           * 其他模式   = 计数桩(硬件后配) */
+          const pulse_param_t *pp = pulse_param_get();
+
+          if ((pp->mode == PULSE_MODE_DUAL) &&
+              pwm_fire_dual(pp->dual_p1_us, pp->dual_gap_us, pp->dual_p2_us))
+          {
+            pulse_trigger_fire();     /* 计数+LED反馈走原有路径 */
+          }
+          else if (pp->mode == PULSE_MODE_DUAL)
+          {
+            printf(">> Dual fire FAIL (busy/resolution)\r\n");
+          }
+          else
+          {
+            pulse_trigger_fire();
+          }
         }
       }
       break;
@@ -314,13 +331,30 @@ static void ui_handle_event(key_event_t ev, key_id_t id)
     case UI_HOME_MODESEL:
       if (move && id == KEY_ID_UP)
       {
+        pulse_mode_t old_mode = pulse_param_get()->mode;
+
         pulse_param_set_mode((pulse_mode_t)((pulse_param_get()->mode + PULSE_MODE_COUNT - 1u) % PULSE_MODE_COUNT));
+
+        /* 切模式必停输出(含PWMEn标志复位, UI一致) */
+        if (pulse_param_get()->mode != old_mode)
+        {
+          pwm_out_stop();
+        }
+
         main_rebuild_page();
         main_fix_scroll();
       }
       else if (move && id == KEY_ID_DOWN)
       {
+        pulse_mode_t old_mode = pulse_param_get()->mode;
+
         pulse_param_set_mode((pulse_mode_t)((pulse_param_get()->mode + 1u) % PULSE_MODE_COUNT));
+
+        if (pulse_param_get()->mode != old_mode)
+        {
+          pwm_out_stop();
+        }
+
         main_rebuild_page();
         main_fix_scroll();
       }
@@ -447,17 +481,17 @@ static void app_1s_task(void)
 
   snprintf(g_line, sizeof(g_line),
            "Hello, uptime:%lus | Mode=%s PWMEN=%u SYNC=%u TRIG=%lu | T3=%luHz T4=%luHz | "
-           "C1[%u] D%u P%u C2[%u] D%u P%u C3[%u] D%u P%u "
-           "C4[%u] D%u P%u C5[%u] D%u P%u C6[%u] D%u P%u\r\n",
+           "C1[%u] D%u.%02u P%u C2[%u] D%u.%02u P%u C3[%u] D%u.%02u P%u "
+           "C4[%u] D%u.%02u P%u C5[%u] D%u.%02u P%u C6[%u] D%u.%02u P%u\r\n",
            (unsigned long)g_uptime_s, pulse_mode_name(p->mode), p->pwm_enabled,
            p->pwm_sync, (unsigned long)pulse_trigger_count(),
            (unsigned long)p->freq_hz[0], (unsigned long)p->freq_hz[1],
-           p->ch[0].enabled, p->ch[0].duty_pct, p->ch[0].phase_pct,
-           p->ch[1].enabled, p->ch[1].duty_pct, p->ch[1].phase_pct,
-           p->ch[2].enabled, p->ch[2].duty_pct, p->ch[2].phase_pct,
-           p->ch[3].enabled, p->ch[3].duty_pct, p->ch[3].phase_pct,
-           p->ch[4].enabled, p->ch[4].duty_pct, p->ch[4].phase_pct,
-           p->ch[5].enabled, p->ch[5].duty_pct, p->ch[5].phase_pct);
+           p->ch[0].enabled, p->ch[0].duty_bp / 100u, p->ch[0].duty_bp % 100u, p->ch[0].phase_pct,
+           p->ch[1].enabled, p->ch[1].duty_bp / 100u, p->ch[1].duty_bp % 100u, p->ch[1].phase_pct,
+           p->ch[2].enabled, p->ch[2].duty_bp / 100u, p->ch[2].duty_bp % 100u, p->ch[2].phase_pct,
+           p->ch[3].enabled, p->ch[3].duty_bp / 100u, p->ch[3].duty_bp % 100u, p->ch[3].phase_pct,
+           p->ch[4].enabled, p->ch[4].duty_bp / 100u, p->ch[4].duty_bp % 100u, p->ch[4].phase_pct,
+           p->ch[5].enabled, p->ch[5].duty_bp / 100u, p->ch[5].duty_bp % 100u, p->ch[5].phase_pct);
   printf("%s", g_line);
 
   /* 模式行秒数更新, 走整页刷新 */
@@ -562,6 +596,12 @@ int main(void)
         printf(">> Trigger #%lu (Mode=%s)\r\n", (unsigned long)tc,
                pulse_mode_name(pulse_param_get()->mode));
       }
+    }
+
+    /* 双脉冲序列完成检测(OPM 计满自动停机, 此处收尾) */
+    if (pwm_oneshot_poll())
+    {
+      printf(">> Dual done\r\n");
     }
 
     /* 非阻塞1秒调度 */

@@ -14,7 +14,7 @@
 
 /* 占空比/相位常数 */
 #define PWM_DUTY_0          0u          /* 常低 */
-#define PWM_DUTY_100        100u        /* 常高 */
+#define PWM_DUTY_100        10000u      /* 常高(占空比万分比, 1=0.01%) */
 #define PWM_PHASE_MAX       99u
 
 /* PWM 启动请求(与 pulse 参数解耦, main层负责组装) */
@@ -23,7 +23,7 @@ typedef struct
     uint8_t sync;                   /* 1=T4门控跟随T3共用频率, 0=T4独立 */
     uint32_t freq_hz[2];            /* [0]=TIM3 [1]=TIM4(sync=1时忽略[1]) */
     uint8_t ch_en[PWM_CH_TOTAL];
-    uint8_t ch_duty[PWM_CH_TOTAL];  /* 0~100 */
+    uint16_t ch_duty[PWM_CH_TOTAL]; /* 0~10000 万分比(1=0.01%) */
     uint8_t ch_phase[PWM_CH_TOTAL]; /* 0~99, 相对周期起点偏移 */
 } pwm_req_t;
 
@@ -31,5 +31,12 @@ uint8_t pwm_validate(const pwm_req_t *req); /* 1=配置合法(不碰硬件) */
 uint8_t pwm_apply(const pwm_req_t *req);    /* 停-配-启, 1=成功(内部先validate) */
 void pwm_stop(void);                        /* 全停, 引脚强制低 */
 uint8_t pwm_is_running(void);
+
+/* ---- 双脉冲单次输出 ---- */
+uint8_t pwm_fire_dual(uint32_t p1_us, uint32_t gap_us, uint32_t p2_us);
+    /* 1=已触发; 运行中/非法参数=0(丢弃)。固定全通道输出:
+     * PWM模式的通道勾选仅作用于PWM模式, 双脉冲默认6路齐发 */
+uint8_t pwm_oneshot_active(void);               /* 1=双脉冲序列运行中 */
+uint8_t pwm_oneshot_poll(void);                 /* 主循环轮询, 序列刚完成返回1(内部收尾强制低) */
 
 #endif /* __PWM_H */

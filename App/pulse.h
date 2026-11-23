@@ -34,14 +34,14 @@ typedef enum
 #define PULSE_TIM_COUNT     2u
 #define PULSE_FREQ_MIN      1u
 #define PULSE_FREQ_MAX      100000u
-#define PULSE_DUTY_MAX      100u    /* 占空比 0~100% */
+#define PULSE_DUTY_MAX      10000u  /* 占空比万分比: 1=0.01%, 0~10000(=100%) */
 #define PULSE_PHASE_MAX     99u     /* 相位 0~99% */
 
 /* PWM 通道参数 */
 typedef struct
 {
     uint8_t enabled;        /* 勾选 */
-    uint8_t duty_pct;       /* 0~100 */
+    uint16_t duty_bp;       /* 占空比万分比: 1=0.01%, 0~10000 */
     uint8_t phase_pct;      /* 0~99 */
 } pulse_ch_t;
 
@@ -105,6 +105,7 @@ typedef struct
     uint32_t value;
     uint32_t min;
     uint32_t max;
+    uint8_t bp;             /* 1=值/范围按万分比显示(xx.xx) */
 } pulse_edit_info_t;
 
 /* ---- API ---- */

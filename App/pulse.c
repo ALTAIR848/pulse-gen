@@ -41,7 +41,7 @@ void pulse_param_init(void)
     for (uint32_t c = 0u; c < PULSE_CH_COUNT; c++)
     {
         g_pulse.ch[c].enabled = 0u;
-        g_pulse.ch[c].duty_pct = 50u;
+        g_pulse.ch[c].duty_bp = 5000u;      /* 50.00% */
         g_pulse.ch[c].phase_pct = 0u;
     }
 
@@ -49,9 +49,9 @@ void pulse_param_init(void)
     g_pulse.pwm_sync = 0u;
 
     /* 双脉冲默认值 */
-    g_pulse.dual_p1_us = 100u;
-    g_pulse.dual_gap_us = 500u;
-    g_pulse.dual_p2_us = 100u;
+    g_pulse.dual_p1_us = 10u;
+    g_pulse.dual_gap_us = 10u;
+    g_pulse.dual_p2_us = 10u;
 
     /* 清零+单脉冲默认值 */
     g_pulse.cs_freq_hz = 1000u;
@@ -234,6 +234,8 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
     uint32_t min = 1u;
     uint32_t max = 65535u;
 
+    info->bp = 0u;      /* 默认整数显示, 占空比分支单独置1(万分比) */
+
     switch ((pulse_row_type_t)row_type)
     {
         case PULSE_ROW_TIM_FREQ:
@@ -265,14 +267,15 @@ uint8_t pulse_begin_edit(uint8_t row_type, uint8_t idx, pulse_edit_info_t *info)
             }
 
             snprintf(s_edit_name, sizeof(s_edit_name), "Duty %s", pulse_ch_name(idx));
-            /* 占空比走 ±1 线性步进, 挂到通道字段上 */
+            /* 占空比走 ±1(0.01%) 线性步进, 挂到通道字段上 */
             info->name = s_edit_name;
             info->unit = "%";
-            info->value = g_pulse.ch[idx].duty_pct;
+            info->value = g_pulse.ch[idx].duty_bp;
             info->min = 0u;
             info->max = PULSE_DUTY_MAX;
+            info->bp = 1u;                      /* 编辑页按 xx.xx 显示 */
             s_edit_ptr = 0;
-            s_edit_backup = g_pulse.ch[idx].duty_pct;
+            s_edit_backup = g_pulse.ch[idx].duty_bp;
             s_edit_row_kind = (uint8_t)PULSE_ROW_CH_DUTY;
             s_edit_idx = idx;
             s_edit_active = 1u;
@@ -368,23 +371,42 @@ void pulse_edit_step(int8_t dir, uint32_t mult)
         mult = 1u;
     }
 
-    if ((s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY) ||
-        (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_PHASE))
+    if (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY)
     {
-        pulse_ch_t *ch = &g_pulse.ch[s_edit_idx];
-        uint8_t *pv = (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY) ? &ch->duty_pct : &ch->phase_pct;
-        uint32_t max = (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY) ? PULSE_DUTY_MAX : PULSE_PHASE_MAX;
-        uint32_t m = (mult > 10u) ? 10u : mult;     /* 0~100 范围, 倍率封顶10 */
-        int32_t v = (int32_t)*pv + (int32_t)dir * (int32_t)m;
+        /* 占空比: 万分比 0~10000, ±1=0.01%, 倍率封顶100(=1%/拍) */
+        uint16_t *pv = &g_pulse.ch[s_edit_idx].duty_bp;
+        int32_t m = (mult > 100u) ? 100u : (int32_t)mult;
+        int32_t v = (int32_t)*pv + (int32_t)dir * m;
 
         if (v < 0)
         {
             v = 0;
         }
 
-        if (v > (int32_t)max)
+        if (v > (int32_t)PULSE_DUTY_MAX)
         {
-            v = (int32_t)max;
+            v = (int32_t)PULSE_DUTY_MAX;
+        }
+
+        *pv = (uint16_t)v;
+        return;
+    }
+
+    if (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_PHASE)
+    {
+        /* 相位: 百分比 0~99, ±1=1%, 倍率封顶10 */
+        uint8_t *pv = &g_pulse.ch[s_edit_idx].phase_pct;
+        int32_t m = (mult > 10u) ? 10u : (int32_t)mult;
+        int32_t v = (int32_t)*pv + (int32_t)dir * m;
+
+        if (v < 0)
+        {
+            v = 0;
+        }
+
+        if (v > (int32_t)PULSE_PHASE_MAX)
+        {
+            v = (int32_t)PULSE_PHASE_MAX;
         }
 
         *pv = (uint8_t)v;
@@ -422,8 +444,8 @@ uint32_t pulse_edit_value(void)
         (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_PHASE))
     {
         return (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY)
-               ? g_pulse.ch[s_edit_idx].duty_pct
-               : g_pulse.ch[s_edit_idx].phase_pct;
+               ? (uint32_t)g_pulse.ch[s_edit_idx].duty_bp
+               : (uint32_t)g_pulse.ch[s_edit_idx].phase_pct;
     }
 
     return (s_edit_ptr != 0) ? *s_edit_ptr : 0u;
@@ -442,7 +464,7 @@ void pulse_edit_cancel(void)
     }
     else if (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_DUTY)
     {
-        g_pulse.ch[s_edit_idx].duty_pct = (uint8_t)s_edit_backup;
+        g_pulse.ch[s_edit_idx].duty_bp = (uint16_t)s_edit_backup;
     }
     else if (s_edit_row_kind == (uint8_t)PULSE_ROW_CH_PHASE)
     {

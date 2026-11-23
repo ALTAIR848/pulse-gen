@@ -123,8 +123,11 @@ static uint8_t main_row_text(char *buf, uint8_t size,
                                      (unsigned)(idx + 3u), (unsigned long)p->freq_hz[idx]);
 
         case PULSE_ROW_CH_DUTY:
-            return (uint8_t)snprintf(buf, size, "%c%s D:%3u%%", mark,
-                                     pulse_ch_name(idx), p->ch[idx].duty_pct);
+            /* 占空比万分比: 1=0.01%, 显示 xx.xx% */
+            return (uint8_t)snprintf(buf, size, "%c%s D:%2u.%02u%%", mark,
+                                     pulse_ch_name(idx),
+                                     (unsigned)(p->ch[idx].duty_bp / 100u),
+                                     (unsigned)(p->ch[idx].duty_bp % 100u));
 
         case PULSE_ROW_CH_PHASE:
             return (uint8_t)snprintf(buf, size, "%c%s P:%2u%%", mark,
@@ -210,12 +213,33 @@ void display_show_edit_page(const pulse_edit_info_t *info)
     pad_line(line, 16u);
     oled_show_string(0, 0, line, 16);
 
-    snprintf(line, sizeof(line), "%lu %s", (unsigned long)info->value, info->unit);
+    if (info->bp)       /* 万分比: xx.xx 显示 */
+    {
+        snprintf(line, sizeof(line), "%lu.%02lu %s",
+                 (unsigned long)(info->value / 100u),
+                 (unsigned long)(info->value % 100u), info->unit);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "%lu %s", (unsigned long)info->value, info->unit);
+    }
+
     pad_line(line, 10u);
     oled_show_string(0, 16, line, 24);
 
-    snprintf(line, sizeof(line), "%lu~%lu %s", (unsigned long)info->min,
-             (unsigned long)info->max, info->unit);
+    if (info->bp)
+    {
+        snprintf(line, sizeof(line), "%lu.%02lu~%lu.%02lu %s",
+                 (unsigned long)(info->min / 100u), (unsigned long)(info->min % 100u),
+                 (unsigned long)(info->max / 100u), (unsigned long)(info->max % 100u),
+                 info->unit);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "%lu~%lu %s", (unsigned long)info->min,
+                 (unsigned long)info->max, info->unit);
+    }
+
     pad_line(line, 21u);
     oled_show_string(0, 40, line, 12);
 
