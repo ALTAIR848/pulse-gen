@@ -613,7 +613,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   LED1_OFF();
   pulse_param_init();
-  pulse_param_load();
+  printf("param load %s\r\n", pulse_param_load() ? "OK(flash)" : "DEFAULT");
   key_init();
   display_init();
   main_rebuild_page();

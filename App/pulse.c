@@ -5,7 +5,8 @@
  *          频率步进用 1/2/5 序列(遥控器手感), 占空比/相位 ±1 线性步进
  */
 #include "pulse.h"
-#include <stdio.h>
+#include "stdio.h"
+#include "stmflash.h"
 
 static pulse_param_t g_pulse;
 
@@ -71,6 +72,7 @@ void pulse_param_set_mode(pulse_mode_t m)
     if (m < PULSE_MODE_COUNT)
     {
         g_pulse.mode = m;
+        pulse_param_save();
     }
 }
 
@@ -79,22 +81,26 @@ void pulse_ch_toggle(uint8_t ch_idx)
     if (ch_idx < PULSE_CH_COUNT)
     {
         g_pulse.ch[ch_idx].enabled = !g_pulse.ch[ch_idx].enabled;
+        pulse_param_save();
     }
 }
 
 void pulse_pwm_toggle(void)
 {
     g_pulse.pwm_enabled = !g_pulse.pwm_enabled;
+    pulse_param_save();
 }
 
 void pulse_sync_toggle(void)
 {
     g_pulse.pwm_sync = !g_pulse.pwm_sync;
+    pulse_param_save();
 }
 
 void pulse_cs_toggle(void)
 {
     g_pulse.cs_enabled = !g_pulse.cs_enabled;
+    pulse_param_save();
 }
 
 void pulse_cs_disable(void)
@@ -487,7 +493,8 @@ void pulse_edit_cancel(void)
 
 void pulse_edit_commit(void)
 {
-    /* 值已实时生效; 预留: 此处触发FLASH保存 */
+    /* 值已实时生效: 提交即写FLASH掉电保存 */
+    pulse_param_save();
     s_edit_active = 0u;
 }
 
@@ -502,11 +509,93 @@ uint32_t pulse_trigger_count(void)
     return s_trig_count;
 }
 
-/* ---- 预留: 参数掉电保存(参考例程19, 后续实现) ---- */
+/* ---- 参数掉电保存(FLASH最后一页, 移植自例程19) ----
+ * 页格式(半字序列):
+ *   [0..1] magic = 0x53504C45 ("ELPS")
+ *   [2]    payload尺寸(半字个数, 结构体布局变更防护)
+ *   [3]    保留(0)
+ *   [4..5] 校验和(payload半字累加和)
+ *   [6..]  payload = pulse_param_t 字节流(小端, 奇数字节补0)
+ * 使能类状态(pwm_enabled/cs_enabled)不持久化: 上电不自动开输出 */
+#define PULSE_FLASH_ADDR    (STM32_FLASH_BASE + STM32_FLASH_SIZE - STM32_SECTOR_SIZE)
+#define PULSE_SAVE_MAGIC    0x53504C45u
+#define PULSE_SAVE_HDR      6u      /* 头部半字个数 */
+
 void pulse_param_save(void)
 {
+    pulse_param_t snap = g_pulse;
+    const uint16_t n = (uint16_t)((sizeof(pulse_param_t) + 1u) / 2u);
+    uint16_t buf[PULSE_SAVE_HDR + ((sizeof(pulse_param_t) + 1u) / 2u)];
+    const uint8_t *src = (const uint8_t *)&snap;
+    uint16_t i;
+    uint32_t sum = 0u;
+
+    snap.pwm_enabled = 0u;      /* 使能态不持久化 */
+    snap.cs_enabled = 0u;
+
+    /* 结构体字节流 -> 小端半字(奇数字节补0) */
+    for (i = 0u; i < n; i++)
+    {
+        uint16_t lo = src[2u * i];
+        uint16_t hi = ((2u * i + 1u) < sizeof(pulse_param_t)) ? src[2u * i + 1u] : 0u;
+
+        buf[PULSE_SAVE_HDR + i] = (uint16_t)(lo | (uint16_t)(hi << 8));
+        sum += buf[PULSE_SAVE_HDR + i];
+    }
+
+    buf[0] = (uint16_t)(PULSE_SAVE_MAGIC & 0xFFFFu);
+    buf[1] = (uint16_t)(PULSE_SAVE_MAGIC >> 16);
+    buf[2] = n;
+    buf[3] = 0u;
+    buf[4] = (uint16_t)(sum & 0xFFFFu);
+    buf[5] = (uint16_t)(sum >> 16);
+
+    stmflash_write(PULSE_FLASH_ADDR, buf, (uint16_t)(PULSE_SAVE_HDR + n));
 }
 
-void pulse_param_load(void)
+uint8_t pulse_param_load(void)
 {
+    pulse_param_t tmp;
+    uint8_t *dst = (uint8_t *)&tmp;
+    const uint16_t n = (uint16_t)((sizeof(pulse_param_t) + 1u) / 2u);
+    uint16_t buf[PULSE_SAVE_HDR + ((sizeof(pulse_param_t) + 1u) / 2u)];
+    uint16_t i;
+    uint32_t sum = 0u;
+
+    stmflash_read(PULSE_FLASH_ADDR, buf, (uint16_t)(PULSE_SAVE_HDR + n));
+
+    /* magic / 尺寸 / 校验和 任一不符 -> 视为无有效数据, 保持默认值 */
+    if ((buf[0] != (uint16_t)(PULSE_SAVE_MAGIC & 0xFFFFu)) ||
+            (buf[1] != (uint16_t)(PULSE_SAVE_MAGIC >> 16)) ||
+            (buf[2] != n))
+    {
+        return 0u;
+    }
+
+    for (i = 0u; i < n; i++)
+    {
+        sum += buf[PULSE_SAVE_HDR + i];
+    }
+
+    if ((buf[4] != (uint16_t)(sum & 0xFFFFu)) ||
+            (buf[5] != (uint16_t)(sum >> 16)))
+    {
+        return 0u;
+    }
+
+    /* 半字 -> 结构体字节流 */
+    for (i = 0u; i < n; i++)
+    {
+        dst[2u * i] = (uint8_t)(buf[PULSE_SAVE_HDR + i] & 0xFFu);
+
+        if ((2u * i + 1u) < sizeof(pulse_param_t))
+        {
+            dst[2u * i + 1u] = (uint8_t)(buf[PULSE_SAVE_HDR + i] >> 8);
+        }
+    }
+
+    tmp.pwm_enabled = 0u;       /* 使能态不持久化: 上电不自动开输出 */
+    tmp.cs_enabled = 0u;
+    g_pulse = tmp;
+    return 1u;
 }

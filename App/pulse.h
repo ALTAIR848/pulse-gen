@@ -131,8 +131,8 @@ uint32_t pulse_edit_value(void);                /* 当前编辑中的值(刷新�
 void pulse_edit_cancel(void);                   /* 取消, 恢复进入编辑前的值 */
 void pulse_edit_commit(void);                   /* 保存(值已实时生效, 预留FLASH写入点) */
 
-void pulse_param_save(void);                    /* 预留: FLASH掉电保存 */
-void pulse_param_load(void);                    /* 预留: FLASH加载 */
+void pulse_param_save(void);                    /* FLASH掉电保存(自动在各参数变更点调用) */
+uint8_t pulse_param_load(void);                 /* FLASH加载, 返回1=载入有效数据 0=用默认值 */
 
 void pulse_trigger_fire(void);                  /* 触发脉冲请求(硬件未实现前仅计数) */
 uint32_t pulse_trigger_count(void);             /* 累计触发次数 */
